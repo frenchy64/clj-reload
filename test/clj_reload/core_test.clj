@@ -177,6 +177,14 @@ Unexpected :require form: [789 a b c]
   (is (= '[:unload h f a d e :load e d a f h] (modify {:no-load ['c]} 'e)))
   (is (= '[:unload h f a d e :load e c d a f h] (modify {:no-unload ['c]} 'e))))
 
+(deftest cycle-test
+  (reset)
+  (require 'cycle-a)
+  (with-changed 'cycle_a "(ns cycle-a (:require cycle-b))"
+    (is (thrown? Exception (reload)))
+    (is (= '[:unload a d c e :load e :load-fail c] @*trace)))
+  )
+
 (comment
   (test/test-ns *ns*)
   (clojure.test/run-test-var #'reload-broken))
