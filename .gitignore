@@ -8,3 +8,4 @@ target
 .portal/
 .clj-kondo/.cache/
 **/__pycache__/
+.lein-*
