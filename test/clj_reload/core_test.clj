@@ -79,7 +79,7 @@ Unexpected :require form: [789 a b c]
     (doseq [^File file (next (file-seq (io/file "fixtures")))
             :when (> (.lastModified file) now)]
       (.setLastModified file now)))
-  (doseq [ns '[l i j k f a g h d c e b]]
+  (doseq [ns '[l i j k f a g h d c e b cycle-a cycle-b]]
     (when (@@#'clojure.core/*loaded-libs* ns)
       (remove-ns ns)
       (dosync
@@ -96,12 +96,12 @@ Unexpected :require form: [789 a b c]
 
 (defmacro with-changed [sym content' & body]
   `(let [sym#     ~sym
-         file#    (io/file "fixtures" (str ~sym ".clj"))
+         file#    (io/file "fixtures" (str sym# ".clj"))
          content# (slurp file#)]
      (try
        (spit file# ~content')
        (touch sym#)
-       ~@body
+       (do ~@body)
        (finally
          (spit file# content#)
          (touch sym#)))))
@@ -110,9 +110,9 @@ Unexpected :require form: [789 a b c]
   (swap! *trace
     (fn [track]
       (let [last-op (->> track (filter keyword?) last)]
-        (cond-> track
-          (not= op last-op) (conj op)
-          true              (conj ns))))))
+        (-> track
+            (cond-> (not= op last-op) (conj op))
+            (conj ns))))))
 
 (defn reload []
   (binding [reload/*log-fn* log-fn
@@ -123,15 +123,14 @@ Unexpected :require form: [789 a b c]
   (let [[opts syms] (if (map? (first syms))
                       [(first syms) (next syms)]
                       [nil syms])
-        opts        (merge {:dirs ["fixtures"]}
-                      opts)]
-    (try
-      (reset)
-      (doeach require (:require opts '[b e c d h g a f k j i l]))
-      (reload/init opts)
-      (doeach touch syms)
-      (reload)
-      @*trace)))
+        opts        (into {:dirs ["fixtures"]}
+                          opts)]
+    (reset)
+    (doeach require (:require opts '[b e c d h g a f k j i l]))
+    (reload/init opts)
+    (doeach touch syms)
+    (reload)
+    @*trace))
 
 ;    a     f     i  l 
 ;  / | \ /   \   |    
@@ -182,8 +181,7 @@ Unexpected :require form: [789 a b c]
   (require 'cycle-a)
   (with-changed 'cycle_a "(ns cycle-a (:require cycle-b))"
     (is (thrown? Exception (reload)))
-    (is (= '[:unload a d c e :load e :load-fail c] @*trace)))
-  )
+    (is (= ::FIXME @*trace))))
 
 (comment
   (test/test-ns *ns*)
