@@ -79,11 +79,11 @@ Unexpected :require form: [789 a b c]
     (doseq [^File file (next (file-seq (io/file "fixtures")))
             :when (> (.lastModified file) now)]
       (.setLastModified file now)))
-  (doseq [ns '[l i j k f a g h d c e b cycle-a cycle-b]]
-    (when (@@#'clojure.core/*loaded-libs* ns)
-      (remove-ns ns)
-      (dosync
-        (alter @#'clojure.core/*loaded-libs* disj ns)))))
+  (doseq [ns '[l i j k f a g h d c e b cycle-a cycle-b]
+          :when (@@#'clojure.core/*loaded-libs* ns)]
+    (remove-ns ns)
+    (dosync
+      (alter @#'clojure.core/*loaded-libs* disj ns))))
 
 (defn touch [sym]
   (let [now  (swap! *time + 1000)
@@ -179,8 +179,11 @@ Unexpected :require form: [789 a b c]
 (deftest cycle-test
   (reset)
   (require 'cycle-a)
-  (with-changed 'cycle_a "(ns cycle-a (:require cycle-b))"
-    (is (thrown? Exception (reload)))
+  (is (= ::FIXME @clj-reload.core/*state))
+  (reload)
+  (is (= ::FIXME @clj-reload.core/*state))
+  (with-changed 'cycle_b "(ns cycle-b (:require cycle-a)) (println :reloading-cycle-b)"
+    (is (= ::FIXME (reload)))
     (is (= ::FIXME @*trace))))
 
 (comment
