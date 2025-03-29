@@ -313,16 +313,21 @@
   (let [files (-> @*state :namespaces ns :ns-files)]
     (some #(ns-load ns % (-> @*state :namespaces ns :keep)) files)))
 
+(declare fj-reload1)
+
+;;TODO threadpool
+(defn- fj-fork [fj-info opts] (run! #(fj-reload1 % opts) fj-info))
+
 (defn- fj-reload1
-  [[ns {:keys [unload? load? load-after] :as fj-info}] opts]
+  [[ns {:keys [unload? load-after load?] :as fj-info}] opts]
   (when unload?
     (do-unload ns))
-  (run! #(fj-reload1 % opts) load-after)
+  (fj-fork load-after opts)
   (when load?
     (do-load ns)))
 
 ;;TODO fork => unload, join => load
-#_
+;#_
 (defn- fj-reload
   "Options:
 
@@ -352,7 +357,13 @@
             plan (plan/linear-fj-plan state)]
         (when (= (:output *config*) :quieter)
           (util/log (format "Reloading %s namespaces..." (count (:to-load state)))))
-        (run! #(fj-reload1 % opts) plan)))))
+        (try (fj-fork plan opts)
+             (-> @*state
+                 (select-keys [::unloaded ::loaded])
+                 (set/rename-keys {::unloaded :unloaded ::loaded :loaded}))
+             (catch Throwable e
+               {:failed 'fixme
+                :exception e}))))))
 
 (defn unload
   "Same as `reload`, but does not load namespaces back"
