@@ -33,9 +33,9 @@
 ; Top ones require bottom ones
 ; 
 ;    a     f     i  l  m
-;  ╱ │ ╲ ╱   ╲   │     │
-; b  c  d  h  g  j     n
-;     ╲ │ ╱      │     │
+;  ╱ │ ╲ ╱   ╲   │     │╲
+; b  c  d  h  g  j     n│
+;     ╲ │ ╱      │     │╱
 ;       e        k     o
 
 (deftest find-namespaces-test
