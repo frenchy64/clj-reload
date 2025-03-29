@@ -376,10 +376,10 @@
                                            (when-not @cancelled
                                              (if-some [ex (some #(ns-load ns % (-> state :namespaces ns :keep)) files)]
                                                (let [_ (vreset! cancelled true)
-                                                     {:keys [to-load]} (swap! *state update :to-unload #(cons ns %))]
+                                                     {:keys [to-load] ::keys [loaded]} (swap! *state update :to-unload #(cons ns %))]
                                                  (deliver prm {:result    :failed
                                                                :unloaded  unloaded
-                                                               ;:loaded    loaded
+                                                               :loaded    loaded
                                                                :failed    ns
                                                                :exception ex})
                                                  (run! #(deliver % {:result :cancelled :failed ns}) (vals to-load-promises))
@@ -388,11 +388,12 @@
                                                      (ex-info
                                                        (str "Failed to load namespace: " ns)
                                                        {:unloaded unloaded
-                                                        ;:loaded   loaded
+                                                        :loaded   loaded
                                                         :failed   ns}
                                                        ex))))
                                                (do (swap! *state #(-> %
                                                                       (update :to-load (fn [to-load] (doall (remove #{ns} to-load))))
+                                                                      (update ::loaded conj ns)
                                                                       (update-in [:namespaces ns] dissoc :keep)))
                                                    (deliver prm {:result :loaded})
                                                    ns))))
@@ -401,21 +402,22 @@
                                            (deliver (to-load-promises ns)
                                                     {:result    :failed
                                                      :unloaded  unloaded
-                                                     ;:loaded    loaded
+                                                     :loaded    (::loaded @*state)
                                                      :failed    ns
                                                      :exception e})
                                            (run! #(deliver % {:result :cancelled :failed ns}) (vals to-load-promises))
                                            (throw e))))))
                               (range (count to-load)))))]
-             (let [{::keys [loaded]} @*state]
-               (when (and
-                       (= (:output *config*) :verbose)
-                       (empty? loaded))
-                 (util/log "Nothing to reload"))
-               (when (#{:verbose :quieter} (:output *config*))
-                 (util/log (format "Reloaded %s namespaces in %s ms" (count loaded) (- (System/currentTimeMillis) t))))
-               {:unloaded unloaded
-                :loaded   loaded}))
+             (or (some #(let [res @%] (when (-> res :result (= :failed)) (dissoc res :result))) (vals to-load-promises))
+                 (let [{::keys [loaded]} @*state]
+                   (when (and
+                           (= (:output *config*) :verbose)
+                           (empty? loaded))
+                     (util/log "Nothing to reload"))
+                   (when (#{:verbose :quieter} (:output *config*))
+                     (util/log (format "Reloaded %s namespaces in %s ms" (count loaded) (- (System/currentTimeMillis) t))))
+                   {:unloaded unloaded
+                    :loaded   loaded})))
            (finally
              (.shutdown threadpool))))))))
 
