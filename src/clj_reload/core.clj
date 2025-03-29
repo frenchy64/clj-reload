@@ -2,6 +2,7 @@
   (:require
    [clj-reload.keep :as keep]
    [clj-reload.parse :as parse]
+   [clj-reload.plan :as plan]
    [clj-reload.util :as util]
    [clojure.java.io :as io])
   (:import
@@ -60,7 +61,8 @@
 (defmacro with-lock [& body]
   `(try
      (.lock lock)
-     ~@body
+     (locking clojure.lang.RT/REQUIRE_LOCK
+       (do ~@body))
      (finally
        (.unlock lock))))
 
@@ -182,14 +184,6 @@
                             :files       files'
                             :namespaces  namespaces'})))))))
 
-(defn- topo-sort-fn
-  "Accepts dependees map {ns -> #{downsteram-ns ...}},
-   returns a fn that topologically sorts dependencies"
-  [deps]
-  (let [sorted (parse/topo-sort deps)]
-    (fn [coll]
-      (filter (set coll) sorted))))
-
 (defn- add-unloaded [scan re loaded]
   (let [new (->> (keys (:namespaces' scan))
               (remove loaded)
@@ -234,7 +228,7 @@
                             (not (no-unload %))
                             (not (no-reload %)))
         deps             (parse/dependees namespaces)
-        topo-sort        (topo-sort-fn deps) 
+        topo-sort        (plan/topo-sort-fn deps) 
         to-unload''      (->> to-unload'
                            (filter unload?)
                            (parse/transitive-closure deps)
@@ -253,7 +247,7 @@
                             (not (no-reload %))
                             (namespaces' %))
         deps'            (parse/dependees namespaces')
-        topo-sort'       (topo-sort-fn deps')
+        topo-sort'       (plan/topo-sort-fn deps')
         to-load''        (->> to-load'
                            (filter load?)
                            (parse/transitive-closure deps')
@@ -356,41 +350,76 @@
    (with-lock
      (binding [util/*log-fn* (:log-fn opts util/*log-fn*)]
        (let [t (System/currentTimeMillis)
-             {:keys [unloaded]} (unload opts)]
-         (loop [loaded []]
-           (let [state @*state]
-             (if (not-empty (:to-load state))
-               (let [[ns & to-load'] (:to-load state)
-                     files (-> state :namespaces ns :ns-files)]
-                 (if-some [ex (some #(ns-load ns % (-> state :namespaces ns :keep)) files)]
-                   (do
-                     (swap! *state update :to-unload #(cons ns %))
-                     (if (:throw opts true)
-                       (throw
-                         (ex-info
-                           (str "Failed to load namespace: " ns)
-                           {:unloaded unloaded
-                            :loaded   loaded
-                            :failed   ns}
-                           ex))
-                       {:unloaded  unloaded
-                        :loaded    loaded
-                        :failed    ns
-                        :exception ex}))
-                   (do
-                     (swap! *state #(-> %
-                                      (assoc :to-load to-load')
-                                      (update-in [:namespaces ns] dissoc :keep)))
-                     (recur (conj loaded ns)))))
-               (do
-                 (when (and
-                         (= (:output *config*) :verbose)
-                         (empty? loaded))
-                   (util/log "Nothing to reload"))
-                 (when (#{:verbose :quieter} (:output *config*))
-                   (util/log (format "Reloaded %s namespaces in %s ms" (count loaded) (- (System/currentTimeMillis) t))))
-                 {:unloaded unloaded
-                  :loaded   loaded})))))))))
+             {:keys [unloaded]} (unload opts)
+             threadpool (java.util.concurrent.Executors/newWorkStealingPool
+                          (.. Runtime getRuntime availableProcessors))]
+         (try
+           (swap! *state assoc ::loaded [])
+           (let [state @*state
+                 to-load (vec (:to-load state))
+                 to-load-promises (zipmap (:to-load state) (repeatedly promise))
+                 cancelled (volatile! false)
+                 res 
+                 (mapv (fn [^java.util.concurrent.Future future]
+                         (try (.get future)
+                              (catch java.util.concurrent.ExecutionException e
+                                (throw (or (.getCause e) e)))))
+                       (.invokeAll
+                         threadpool
+                         (map (fn [i]
+                                (let [ns (to-load i)]
+                                  (bound-fn []
+                                    (try (let [load-after (subvec to-load 0 i)
+                                               _ (run! #(deref (to-load-promises %)) load-after)
+                                               files (-> state :namespaces ns :ns-files)
+                                               prm (to-load-promises ns)]
+                                           (when-not @cancelled
+                                             (if-some [ex (some #(ns-load ns % (-> state :namespaces ns :keep)) files)]
+                                               (let [_ (vreset! cancelled true)
+                                                     {:keys [to-load] ::keys [loaded]} (swap! *state update :to-unload #(cons ns %))]
+                                                 (deliver prm {:result    :failed
+                                                               :unloaded  unloaded
+                                                               :loaded    loaded
+                                                               :failed    ns
+                                                               :exception ex})
+                                                 (run! #(deliver % {:result :cancelled :failed ns}) (vals to-load-promises))
+                                                 (when (:throw opts true)
+                                                   (throw
+                                                     (ex-info
+                                                       (str "Failed to load namespace: " ns)
+                                                       {:unloaded unloaded
+                                                        :loaded   loaded
+                                                        :failed   ns}
+                                                       ex))))
+                                               (do (swap! *state #(-> %
+                                                                      (update :to-load (fn [to-load] (doall (remove #{ns} to-load))))
+                                                                      (update ::loaded conj ns)
+                                                                      (update-in [:namespaces ns] dissoc :keep)))
+                                                   (deliver prm {:result :loaded})
+                                                   ns))))
+                                         (catch Throwable e
+                                           (vreset! cancelled true)
+                                           (deliver (to-load-promises ns)
+                                                    {:result    :failed
+                                                     :unloaded  unloaded
+                                                     :loaded    (::loaded @*state)
+                                                     :failed    ns
+                                                     :exception e})
+                                           (run! #(deliver % {:result :cancelled :failed ns}) (vals to-load-promises))
+                                           (throw e))))))
+                              (range (count to-load)))))]
+             (or (some #(let [res @%] (when (-> res :result (= :failed)) (dissoc res :result))) (vals to-load-promises))
+                 (let [{::keys [loaded]} @*state]
+                   (when (and
+                           (= (:output *config*) :verbose)
+                           (empty? loaded))
+                     (util/log "Nothing to reload"))
+                   (when (#{:verbose :quieter} (:output *config*))
+                     (util/log (format "Reloaded %s namespaces in %s ms" (count loaded) (- (System/currentTimeMillis) t))))
+                   {:unloaded unloaded
+                    :loaded   loaded})))
+           (finally
+             (.shutdown threadpool))))))))
 
 (defmulti keep-methods
   (fn [tag]
