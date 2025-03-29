@@ -38,6 +38,15 @@
 ;     ╲ │ ╱      │     │╱
 ;       e        k     o
 
+; ForkJoin task tree.
+; Starts unloading from the top.
+; Once a leaf is reached, loads from the bottom.
+;    a     f     i  l  m
+;  ╱ │ ╲ ╱   ╲   │     │╲
+; b  c  d  h  g  j     n│
+;     ╲ │ ╱      │     │╱
+;       e        k     o
+
 (deftest find-namespaces-test
   (is (= '#{a b c d double e err-runtime f g h i j k l m n no-reload no-unload o split two-nses two-nses-second} (reload/find-namespaces)))
   (is (= '#{a b c d e f g h i j k l m n o} (reload/find-namespaces #"\w")))
