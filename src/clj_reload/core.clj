@@ -199,6 +199,7 @@
                 (:keep ns)))]))
 
 (defn- scan [state opts]
+  (assert (not (thread-bound? #'clojure.core/*loaded-libs*)))
   (let [{:keys [no-unload no-reload]} *config*
         {:keys [since to-load to-unload files namespaces]} state
         {:keys [only] :or {only :changed}} opts
@@ -278,6 +279,7 @@
       ;; because any changes would require reload first
       (util/log "  exception during unload hook" t)))
   (remove-ns ns)
+  (assert (not (thread-bound? #'clojure.core/*loaded-libs*)))
   (dosync
     (alter @#'clojure.core/*loaded-libs* disj ns)))
 
@@ -350,6 +352,8 @@
 
   Can be called multiple times. If reload fails, fix the error and call `fj-reload` again"
   [opts]
+  (or (.isLocked lock)
+      (throw (ex-info "Recursive fj-reload not allowed" {})))
   (with-lock
     (binding [util/*log-fn* (:log-fn opts util/*log-fn*)]
       (let [t (System/currentTimeMillis)
@@ -412,6 +416,8 @@
   ([]
    (reload nil))
   ([opts]
+   ;(fj-reload opts)
+   ;#_
    (with-lock
      (binding [util/*log-fn* (:log-fn opts util/*log-fn*)]
        (let [t (System/currentTimeMillis)
