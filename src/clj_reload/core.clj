@@ -164,7 +164,7 @@
                                      :quiet - no output at all
                                      Default: :verbose"
   [opts]
-  (if (.isHeldByCurrentThread lock)
+  (if (.isLocked lock)
     (util/log "Called `init` from inside `reload`, skipping")
     (with-lock
       (binding [util/*log-fn* nil]
