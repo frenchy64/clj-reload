@@ -260,7 +260,9 @@
       :files      files'
       :namespaces (carry-keeps namespaces namespaces')
       :to-unload  to-unload''
-      :to-load    to-load'')))
+      :to-load    to-load''
+      ::unloaded []
+      ::loaded [])))
 
 (defn- ns-unload [ns]
   (when (= (:output *config*) :verbose)
@@ -306,9 +308,18 @@
                  (update :to-unload (fn [to-unload] (doall (remove #(= ns %) to-unload))))
                  (update :namespaces update ns update :keep util/deep-merge keeps))))))
 
+(defn- do-load
+  [ns]
+  (let [files (-> @*state :namespaces ns :ns-files)]
+    (some #(ns-load ns % (-> @*state :namespaces ns :keep)) files)))
+
 (defn- fj-reload1
-  [ns fj-deps opts]
-  )
+  [[ns {:keys [unload? load? load-after] :as fj-info}] opts]
+  (when unload?
+    (do-unload ns))
+  (run! #(fj-reload1 % opts) load-after)
+  (when load?
+    (do-load ns)))
 
 ;;TODO fork => unload, join => load
 #_
@@ -337,18 +348,11 @@
   (with-lock
     (binding [util/*log-fn* (:log-fn opts util/*log-fn*)]
       (let [t (System/currentTimeMillis)
-            _ (swap! *state scan opts)
-            {:keys [to-load to-unload]} (swap! *state assoc ::unloaded [] ::loaded [])
-            plan (plan/linear-fj-plan to-load)]
-        ;TODO unloaded only
-        (assert (empty? (set/difference (set to-unload) (set to-load))))
+            state (swap! *state scan opts)
+            plan (plan/linear-fj-plan state)]
         (when (= (:output *config*) :quieter)
-          (util/log (format "Reloading %s namespaces..." (count to-load))))
-        (run! (fn [[ns fj-deps]]
-                (fj-reload1 ns
-                            fj-deps
-                            opts))
-              plan)))))
+          (util/log (format "Reloading %s namespaces..." (count (:to-load state)))))
+        (run! #(fj-reload1 % opts) plan)))))
 
 (defn unload
   "Same as `reload`, but does not load namespaces back"
@@ -490,10 +494,9 @@
                                     (bound-fn []
                                       (try (let [load-after (subvec to-load 0 i)
                                                  _ (run! #(deref (promises %)) load-after)
-                                                 files (-> state :namespaces ns :ns-files)
                                                  prm (promises ns)]
                                              (when-not @cancelled
-                                               (if-some [ex (some #(ns-load ns % (-> state :namespaces ns :keep)) files)]
+                                               (if-some [ex (do-load ns)]
                                                  (let [_ (vreset! cancelled true)
                                                        {:keys [to-load] ::keys [loaded]} (swap! *state update :to-unload #(cons ns %))]
                                                    (deliver prm {:result    :failed
