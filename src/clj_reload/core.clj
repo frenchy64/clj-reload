@@ -76,7 +76,9 @@
       (vreset! cancel true)
       (future-cancel fut)
       (throw (ex-info "Could not lock" {:status status})))
-    @fut))
+    (try @fut
+         (catch java.util.concurrent.ExecutionException e
+           (throw (or (.getCause e) e))))))
 
 (defmacro with-lock [& body]
   `(with-lock* #(do ~@body)))
@@ -313,8 +315,8 @@
       t)))
 
 (defn- do-unload
-  [ns]
-  (let [keeps (keep/resolve-keeps ns (-> @*state :namespaces ns :keep))]
+  [ns state]
+  (let [keeps (keep/resolve-keeps ns (-> state :namespaces ns :keep))]
     (ns-unload ns)
     (swap! *state
            (fn [state]
@@ -323,9 +325,9 @@
                  (update :namespaces update ns update :keep util/deep-merge keeps))))))
 
 (defn- do-load
-  [ns]
-  (let [files (-> @*state :namespaces ns :ns-files)]
-    (some #(ns-load ns % (-> @*state :namespaces ns :keep)) files)))
+  [ns state]
+  (let [files (-> state :namespaces ns :ns-files)]
+    (some #(ns-load ns % (-> state :namespaces ns :keep)) files)))
 
 (declare fj-reload1)
 
@@ -335,10 +337,10 @@
 (defn- fj-reload1
   [[ns {:keys [unload? load-after load?] :as fj-info}] opts]
   (when unload?
-    (do-unload ns))
+    (do-unload ns @*state))
   (fj-fork load-after opts)
   (when load?
-    (do-load ns)))
+    (do-load ns @*state)))
 
 ;;TODO fork => unload, join => load
 ;#_
@@ -391,10 +393,9 @@
          (util/log (format "Reloading %s namespaces..." (count (:to-load @*state)))))
        (loop [unloaded []]
          (let [state @*state]
-           (if (not-empty (:to-unload state))
-             (let [[ns & to-unload'] (:to-unload state)]
-               (do-unload ns)
-               (recur (conj unloaded ns)))
+           (if-some [[ns & to-unload'] (seq (:to-unload state))]
+             (do (do-unload ns state)
+                 (recur (conj unloaded ns)))
              (do
                (when (and
                        (= (:output *config*) :verbose)
@@ -435,7 +436,7 @@
            (let [state @*state]
              (if (not-empty (:to-load state))
                (let [[ns & to-load'] (:to-load state)]
-                 (if-some [ex (do-load ns)]
+                 (if-some [ex (do-load ns state)]
                    (do
                      (swap! *state update :to-unload #(cons ns %))
                      (if (:throw opts true)
