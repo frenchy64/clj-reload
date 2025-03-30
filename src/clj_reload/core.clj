@@ -315,32 +315,58 @@
       t)))
 
 (defn- do-unload
-  [ns state]
+  "Returns nil or error map."
+  [ns state opts]
   (let [keeps (keep/resolve-keeps ns (-> state :namespaces ns :keep))]
     (ns-unload ns)
     (swap! *state
            (fn [state]
              (-> state
+                 (update ::unloaded conj ns)
                  (update :to-unload (fn [to-unload] (doall (remove #(= ns %) to-unload))))
-                 (update :namespaces update ns update :keep util/deep-merge keeps))))))
+                 (update :namespaces update ns update :keep util/deep-merge keeps))))
+    nil))
 
 (defn- do-load
-  [ns state]
+  "Returns nil or error map."
+  [ns {::keys [loaded unloaded] :as state} opts]
   (let [files (-> state :namespaces ns :ns-files)]
-    (some #(ns-load ns % (-> state :namespaces ns :keep)) files)))
+    (if-some [ex (some #(ns-load ns % (-> state :namespaces ns :keep)) files)]
+      (do
+        (swap! *state update :to-unload #(cons ns %))
+        (if (:throw opts true)
+          (throw
+            (ex-info
+              (str "Failed to load namespace: " ns)
+              {:unloaded unloaded
+               :loaded   loaded
+               :failed   ns}
+              ex))
+          {:unloaded  unloaded
+           :loaded    loaded
+           :failed    ns
+           :exception ex}))
+      (do
+        (swap! *state #(-> %
+                           (update ::loaded conj ns)
+                           (update :to-load (fn [to-load] (doall (remove #{ns} to-load))))
+                           (update-in [:namespaces ns] dissoc :keep)))
+        nil))))
 
 (declare fj-reload1)
 
 ;;TODO threadpool
-(defn- fj-fork [fj-info opts] (run! #(fj-reload1 % opts) fj-info))
+(defn- fj-fork [fj-info opts] (some #(fj-reload1 % opts) fj-info))
 
 (defn- fj-reload1
-  [[ns {:keys [unload? load-after load?] :as fj-info}] opts]
-  (when unload?
-    (do-unload ns @*state))
-  (fj-fork load-after opts)
-  (when load?
-    (do-load ns @*state)))
+  "Returns nil or error map (or throws)."
+  [[ns {:keys [unload? load-after load?] :as fj-info}] {::keys [cancel] :as opts}]
+  (when-not @cancel
+    (or (when unload?
+          (do-unload ns @*state opts))
+        (fj-fork load-after opts)
+        (when load?
+          (do-load ns @*state opts)))))
 
 ;;TODO fork => unload, join => load
 ;#_
@@ -370,16 +396,17 @@
     (binding [util/*log-fn* (:log-fn opts util/*log-fn*)]
       (let [t (System/currentTimeMillis)
             state (swap! *state scan opts)
+            cancel (volatile! false)
+            opts (assoc opts ::cancel cancel)
             plan (plan/linear-fj-plan state)]
         (when (= (:output *config*) :quieter)
           (util/log (format "Reloading %s namespaces..." (count (:to-load state)))))
-        (try (fj-fork plan opts)
-             (-> @*state
-                 (select-keys [::unloaded ::loaded])
-                 (set/rename-keys {::unloaded :unloaded ::loaded :loaded}))
-             (catch Throwable e
-               {:failed 'fixme
-                :exception e}))))))
+        (or (when-some [err (fj-fork plan opts)]
+              (vreset! cancel true)
+              err)
+            (-> @*state
+                (select-keys [::unloaded ::loaded])
+                (set/rename-keys {::unloaded :unloaded ::loaded :loaded})))))))
 
 (defn unload
   "Same as `reload`, but does not load namespaces back"
@@ -394,7 +421,7 @@
        (loop [unloaded []]
          (let [state @*state]
            (if-some [[ns & to-unload'] (seq (:to-unload state))]
-             (do (do-unload ns state)
+             (do (do-unload ns state opts)
                  (recur (conj unloaded ns)))
              (do
                (when (and
@@ -427,35 +454,16 @@
   ([]
    (reload nil))
   ([opts]
-   ;(fj-reload opts) #_
+   (fj-reload opts) #_
    (with-lock
      (binding [util/*log-fn* (:log-fn opts util/*log-fn*)]
        (let [t (System/currentTimeMillis)
              {:keys [unloaded]} (unload opts)]
          (loop [loaded []]
            (let [state @*state]
-             (if (not-empty (:to-load state))
-               (let [[ns & to-load'] (:to-load state)]
-                 (if-some [ex (do-load ns state)]
-                   (do
-                     (swap! *state update :to-unload #(cons ns %))
-                     (if (:throw opts true)
-                       (throw
-                         (ex-info
-                           (str "Failed to load namespace: " ns)
-                           {:unloaded unloaded
-                            :loaded   loaded
-                            :failed   ns}
-                           ex))
-                       {:unloaded  unloaded
-                        :loaded    loaded
-                        :failed    ns
-                        :exception ex}))
-                   (do
-                     (swap! *state #(-> %
-                                      (assoc :to-load to-load')
-                                      (update-in [:namespaces ns] dissoc :keep)))
-                     (recur (conj loaded ns)))))
+             (if-let [[ns & to-load'] (seq (:to-load state))]
+               (or (do-load ns state opts)
+                   (recur (conj loaded ns)))
                (do
                  (when (and
                          (= (:output *config*) :verbose)
