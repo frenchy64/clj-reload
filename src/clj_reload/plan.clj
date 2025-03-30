@@ -29,7 +29,7 @@
                               {ld {:load? true :unload? false :load-after plan}})
         (unload-only ul) (recur (subvec to-unload 1) to-load
                                 {ul {:load? false :unload? true :load-after plan}})
-        :else (throw (ex-info "uexpected plan" {:state state}))))))
+        :else (throw (ex-info "unexpected plan" (select-keys state [:to-unload :to-load])))))))
 
 (comment
   (linear-fj-plan '{:to-unload (f a h d c e), :to-load (e c d h a f)})
