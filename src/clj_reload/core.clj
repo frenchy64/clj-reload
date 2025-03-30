@@ -56,16 +56,30 @@
 (def ^:private *state
   (atom {}))
 
-(def ^ReentrantLock lock
-  (ReentrantLock.))
+(defn with-lock* [f]
+  (let [started (promise)
+        acquired (promise)
+        cancel (volatile! false)
+        fut (future
+              (deliver started true)
+              (if (Thread/holdsLock clojure.lang.RT/REQUIRE_LOCK)
+                (do (deliver acquired :unexpectedly-already-held-by-current-thread)
+                    {:result :failed-to-lock})
+                (locking clojure.lang.RT/REQUIRE_LOCK
+                  (deliver acquired :acquired)
+                  (if @cancel
+                    {:result :failed-to-lock}
+                    (f)))))
+        _ @started
+        status (deref acquired 1000 :could-not-acquire)]
+    (when-not (= :acquired status)
+      (vreset! cancel true)
+      (future-cancel fut)
+      (throw (ex-info "Could not lock" {:status status})))
+    @fut))
 
 (defmacro with-lock [& body]
-  `(try
-     (.lock lock)
-     (locking clojure.lang.RT/REQUIRE_LOCK
-       (do ~@body))
-     (finally
-       (.unlock lock))))
+  `(with-lock* #(do ~@body)))
 
 (defn- files->namespaces [files already-read]
   (let [*res (volatile! {})]
@@ -164,26 +178,24 @@
                                      :quiet - no output at all
                                      Default: :verbose"
   [opts]
-  (if (.isLocked lock)
-    (util/log "Called `init` from inside `reload`, skipping")
-    (with-lock
-      (binding [util/*log-fn* nil]
-        (let [dirs  (vec (or (:dirs opts) (classpath-dirs)))
-              files (or (:files opts) #".*\.cljc?")
-              now   (util/now)]
-          (alter-var-root #'*config*
-            (constantly
-              {:dirs        dirs
-               :files       files
-               :no-unload   (set (:no-unload opts))
-               :no-reload   (set (:no-reload opts))
-               :reload-hook (:reload-hook opts 'after-ns-reload)
-               :unload-hook (:unload-hook opts 'before-ns-unload)
-               :output      (:output opts :verbose)}))
-          (let [{:keys [files' namespaces']} (scan-impl nil 0)]
-            (reset! *state {:since       now
-                            :files       files'
-                            :namespaces  namespaces'})))))))
+  (with-lock `init
+    (binding [util/*log-fn* nil]
+      (let [dirs  (vec (or (:dirs opts) (classpath-dirs)))
+            files (or (:files opts) #".*\.cljc?")
+            now   (util/now)]
+        (alter-var-root #'*config*
+          (constantly
+            {:dirs        dirs
+             :files       files
+             :no-unload   (set (:no-unload opts))
+             :no-reload   (set (:no-reload opts))
+             :reload-hook (:reload-hook opts 'after-ns-reload)
+             :unload-hook (:unload-hook opts 'before-ns-unload)
+             :output      (:output opts :verbose)}))
+        (let [{:keys [files' namespaces']} (scan-impl nil 0)]
+          (reset! *state {:since       now
+                          :files       files'
+                          :namespaces  namespaces'}))))))
 
 (defn- add-unloaded [scan re loaded]
   (let [new (->> (keys (:namespaces' scan))
@@ -352,9 +364,7 @@
 
   Can be called multiple times. If reload fails, fix the error and call `fj-reload` again"
   [opts]
-  (or (.isLocked lock)
-      (throw (ex-info "Recursive fj-reload not allowed" {})))
-  (with-lock
+  (with-lock `fj-reload
     (binding [util/*log-fn* (:log-fn opts util/*log-fn*)]
       (let [t (System/currentTimeMillis)
             state (swap! *state scan opts)
@@ -374,7 +384,7 @@
   ([]
    (unload nil))
   ([opts]
-   (with-lock
+   (do ;with-lock
      (binding [util/*log-fn* (:log-fn opts util/*log-fn*)]
        (swap! *state scan opts)
        (when (= (:output *config*) :quieter)
@@ -416,8 +426,7 @@
   ([]
    (reload nil))
   ([opts]
-   ;(fj-reload opts)
-   ;#_
+   ;(fj-reload opts) #_
    (with-lock
      (binding [util/*log-fn* (:log-fn opts util/*log-fn*)]
        (let [t (System/currentTimeMillis)
