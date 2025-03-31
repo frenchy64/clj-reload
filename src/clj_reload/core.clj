@@ -56,7 +56,7 @@
 (def ^:private *state
   (atom {}))
 
-(defn with-lock* [f]
+(defn with-lock* [id f]
   (let [started (promise)
         acquired (promise)
         cancel (volatile! false)
@@ -75,13 +75,14 @@
     (when-not (= :acquired status)
       (vreset! cancel true)
       (future-cancel fut)
-      (throw (ex-info "Could not lock" {:status status})))
+      (throw (ex-info "Could not lock" {:id id :status status})))
     (try @fut
          (catch java.util.concurrent.ExecutionException e
            (throw (or (.getCause e) e))))))
 
-(defmacro with-lock [& body]
-  `(with-lock* #(do ~@body)))
+(defmacro with-lock [id & body]
+  (assert (seq body))
+  `(with-lock* ~id #(do ~@body)))
 
 (defn- files->namespaces [files already-read]
   (let [*res (volatile! {})]
@@ -180,7 +181,7 @@
                                      :quiet - no output at all
                                      Default: :verbose"
   [opts]
-  (with-lock `init
+  (with-lock ::init
     (binding [util/*log-fn* nil]
       (let [dirs  (vec (or (:dirs opts) (classpath-dirs)))
             files (or (:files opts) #".*\.cljc?")
@@ -356,17 +357,30 @@
 (declare fj-reload1)
 
 ;;TODO threadpool
-(defn- fj-fork [fj-info opts] (some #(fj-reload1 % opts) fj-info))
+(defn- fj-fork [forks opts] (some #(fj-reload1 % opts) forks))
+
+(defn- do-task 
+  "Returns nil on success, or error map (or throws) on error."
+  [{:keys [op ns]} {::keys [cancel skip] :as opts}]
+  (if @cancel
+    {:result :cancelled :ns ns}
+    (case op
+      :unload (when-not (contains? skip :unload)
+                (do-unload ns @*state opts))
+      :load (when-not (contains? skip :load)
+              (do-load ns @*state opts)))))
+
+(defn- do-synchronous-tasks
+  "Returns nil on success, or error map (or throws) on error."
+  [tasks opts]
+  (some #(do-task % opts) tasks))
 
 (defn- fj-reload1
-  "Returns nil or error map (or throws)."
-  [[ns {:keys [unload? load-after load?] :as fj-info}] {::keys [cancel] :as opts}]
-  (when-not @cancel
-    (or (when unload?
-          (do-unload ns @*state opts))
-        (fj-fork load-after opts)
-        (when load?
-          (do-load ns @*state opts)))))
+  "Returns nil on success, or error map (or throws) on error."
+  [{:keys [before forks after]} opts]
+  (or (do-synchronous-tasks before opts)
+      (fj-fork forks opts)
+      (do-synchronous-tasks after opts)))
 
 ;;TODO fork => unload, join => load
 ;#_
@@ -392,13 +406,13 @@
 
   Can be called multiple times. If reload fails, fix the error and call `fj-reload` again"
   [opts]
-  (with-lock `fj-reload
+  (with-lock ::fj-reload
     (binding [util/*log-fn* (:log-fn opts util/*log-fn*)]
       (let [t (System/currentTimeMillis)
             state (swap! *state scan opts)
             cancel (volatile! false)
             opts (assoc opts ::cancel cancel)
-            plan (plan/linear-fj-plan state)]
+            plan (plan/fj-plan state)]
         (when (= (:output *config*) :quieter)
           (util/log (format "Reloading %s namespaces..." (count (:to-load state)))))
         (or (when-some [err (fj-fork plan opts)]
@@ -412,23 +426,7 @@
   "Same as `reload`, but does not load namespaces back"
   ([]
    (unload nil))
-  ([opts]
-   (do ;with-lock
-     (binding [util/*log-fn* (:log-fn opts util/*log-fn*)]
-       (swap! *state scan opts)
-       (when (= (:output *config*) :quieter)
-         (util/log (format "Reloading %s namespaces..." (count (:to-load @*state)))))
-       (loop [unloaded []]
-         (let [state @*state]
-           (if-some [[ns & to-unload'] (seq (:to-unload state))]
-             (do (do-unload ns state opts)
-                 (recur (conj unloaded ns)))
-             (do
-               (when (and
-                       (= (:output *config*) :verbose)
-                       (empty? unloaded))
-                 (util/log "Nothing to unload"))
-               {:unloaded unloaded}))))))))
+  ([opts] (fj-reload (assoc opts ::skip #{:load}))))
 
 (defn reload
   "Options:
@@ -454,25 +452,7 @@
   ([]
    (reload nil))
   ([opts]
-   (fj-reload opts) #_
-   (with-lock
-     (binding [util/*log-fn* (:log-fn opts util/*log-fn*)]
-       (let [t (System/currentTimeMillis)
-             {:keys [unloaded]} (unload opts)]
-         (loop [loaded []]
-           (let [state @*state]
-             (if-let [[ns & to-load'] (seq (:to-load state))]
-               (or (do-load ns state opts)
-                   (recur (conj loaded ns)))
-               (do
-                 (when (and
-                         (= (:output *config*) :verbose)
-                         (empty? loaded))
-                   (util/log "Nothing to reload"))
-                 (when (#{:verbose :quieter} (:output *config*))
-                   (util/log (format "Reloaded %s namespaces in %s ms" (count loaded) (- (System/currentTimeMillis) t))))
-                 {:unloaded unloaded
-                  :loaded   loaded})))))))))
+   (fj-reload opts)))
 
 (defmulti keep-methods
   (fn [tag]

@@ -20,16 +20,19 @@
         load+unload (set/intersection loads unloads)]
     (loop [[ul :as to-unload] (vec (reverse to-unload))
            [ld :as to-load] (vec to-load)
-           plan nil]
-      (cond
-        (and (empty? to-unload) (empty? to-load)) plan
-        (= ul ld) (recur (subvec to-unload 1) (subvec to-load 1)
-                         {ul {:load? true :unload? true :load-after plan}})
-        (load-only ld) (recur to-unload (subvec to-load 1)
-                              {ld {:load? true :unload? false :load-after plan}})
-        (unload-only ul) (recur (subvec to-unload 1) to-load
-                                {ul {:load? false :unload? true :load-after plan}})
-        :else (throw (ex-info "unexpected plan" (select-keys state [:to-unload :to-load])))))))
+           plan []]
+      (if (or ul ld)
+        (recur (cond-> to-unload ul (subvec 1))
+               (cond-> to-load ld (subvec 1))
+               [(-> {}
+                    (cond-> ul (assoc :before [{:op :unload :ns ul}]))
+                    (assoc :forks plan)
+                    (cond-> ld (assoc :after [{:op :load :ns ld}])))])
+        plan))))
+
+(defn fj-plan
+  [{:keys [to-unload to-load] :as state}]
+  (linear-fj-plan state))
 
 (comment
   (linear-fj-plan '{:to-unload (f a h d c e), :to-load (e c d h a f)})
