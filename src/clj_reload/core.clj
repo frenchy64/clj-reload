@@ -363,8 +363,8 @@
                  (vreset! cancel true)
                  (throw (or (.getCause e) e)))))
         (.invokeAll threadpool
-                    (map (bound-fn [fork]
-                           (bound-fn [] (fj-reload1 fork opts)))
+                    (mapv (fn [fork]
+                            (bound-fn [] (fj-reload1 fork opts)))
                          forks))))
 
 (defn- do-task 
