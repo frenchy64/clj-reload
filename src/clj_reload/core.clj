@@ -411,16 +411,20 @@
       (let [t (System/currentTimeMillis)
             state (swap! *state scan opts)
             cancel (volatile! false)
-            opts (assoc opts ::cancel cancel)
+            max-parallelism 1
+            threadpool (java.util.concurrent.Executors/newWorkStealingPool 1)
+            opts (assoc opts ::cancel cancel ::threadpool threadpool)
             plan (plan/fj-plan state)]
         (when (= (:output *config*) :quieter)
           (util/log (format "Reloading %s namespaces..." (count (:to-load state)))))
-        (or (when-some [err (fj-fork plan opts)]
-              (vreset! cancel true)
-              err)
-            (-> @*state
-                (select-keys [::unloaded ::loaded])
-                (set/rename-keys {::unloaded :unloaded ::loaded :loaded})))))))
+        (try (or (when-some [err (fj-fork plan opts)]
+                   (vreset! cancel true)
+                   err)
+                 (-> @*state
+                     (select-keys [::unloaded ::loaded])
+                     (set/rename-keys {::unloaded :unloaded ::loaded :loaded})))
+             (finally
+               (.shutdown threadpool)))))))
 
 (defn unload
   "Same as `reload`, but does not load namespaces back"
