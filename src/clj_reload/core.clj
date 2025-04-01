@@ -245,7 +245,7 @@
                             (not (no-unload %))
                             (not (no-reload %)))
         deps             (parse/dependees namespaces)
-        topo-sort        (plan/topo-sort-fn deps) 
+        topo-sort        (plan/topo-sort-fn deps)
         to-unload''      (->> to-unload'
                            (filter unload?)
                            (parse/transitive-closure deps)
