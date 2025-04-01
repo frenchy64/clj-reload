@@ -356,8 +356,16 @@
 
 (declare fj-reload1)
 
-;;TODO threadpool
-(defn- fj-fork [forks opts] (some #(fj-reload1 % opts) forks))
+(defn- fj-fork [forks {::keys [^java.util.concurrent.ExecutorService threadpool cancel] :as opts}]
+  (some (fn [^java.util.concurrent.Future future]
+          (try (.get future)
+               (catch java.util.concurrent.ExecutionException e
+                 (vreset! cancel true)
+                 (throw (or (.getCause e) e)))))
+        (.invokeAll threadpool
+                    (map (bound-fn [fork]
+                           (bound-fn [] (fj-reload1 fork opts)))
+                         forks))))
 
 (defn- do-task 
   "Returns nil on success, or error map (or throws) on error."
