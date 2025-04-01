@@ -34,31 +34,6 @@
   [{:keys [to-unload to-load] :as state}]
   (linear-fj-plan state))
 
-(comment
-  (linear-fj-plan '{:to-unload (f a h d c e), :to-load (e c d h a f)})
-  (linear-fj-plan '{:to-unload (i j), :to-load (j)})
-  ; {i {:unload? true :load? false :load-after {j {:unload? true :load? false :load-after? nil}}}}
-  (linear-fj-plan '{:to-unload (), :to-load (i)})
-  (linear-fj-plan {:to-unload '[a b c d e] :to-load (rseq '[a b c d e])})
-  {a
-   {:unload? true,
-    :load? true,
-    :load-after
-    {b
-     {:unload? true,
-      :load? true,
-      :load-after
-      {c
-       {:unload? true,
-        :load? true,
-        :load-after
-        {d
-         {:unload? true,
-          :load? true,
-          :load-after
-          {e {:unload? true, :load? true, :load-after nil}}}}}}}}}}
-)
-
 ;    a     f     i  l  m
 ;  ╱ │ ╲ ╱   ╲   │     │╲
 ; b  c  d  h  g  j     n│
@@ -66,13 +41,69 @@
 ;       e        k     o
 
 ;; 1. Unload roots: a f i l m
-;; 2. Unload max 1 from root: b c d g j n
-;; 3. Unload max 2 from root: e k o
-;; 4. Unload max 3 from root: h
-;; 5. Load leaves: b h g k l o
-;; 6. Load max 1 from leaf with no unloaded deps: e j n
-;; 7. Load max 2 from leaf with no unloaded deps: c d i m
-;; 8. Load max 3 from leaf with no unloaded deps: a f
+;;    Load leaves with all unloaded deps:
+;; 2. Unload max 1 from root with all loaded dependents b c d g j n
+;;    Load max 1 from leaf with all unloaded deps: l
+;; 3. Unload max 2 from root with no loaded dependents: e k o
+;;    Load max 2 from leaf with all unloaded deps: b g
+;; 4. Unload max 3 from root with no loaded dependents: h
+;;    Load max 3 from leaf with all unloaded deps: k o
+;; 5. Load max 4 from leaf with all unloaded deps: e j n
+;; 6. Load max 5 from leaf with all unloaded deps: c d i m
+;; 7. Load max 6 from leaf with all unloaded deps: a f
 
-(defn fj-plan-group [opts]
+(comment
+  [{:before (mapv #(do {:op :unload :ns a}) [])}]
+  )
+
+;; not a great approach as it doesn't fully utilize threads. no coordination necessary though.
+(defn fj-plan-rings [opts]
+  )
+
+(defn fj-fsm [{:keys [to-unload to-load namespaces]} opts]
+  (let [_ (prn namespaces)
+        _ (prn deps)
+        state (atom {:unloaded #{}
+                     :loaded #{}
+                     :to-unload to-unload
+                     :to-load to-load})
+        dependees (parse/dependees namespaces)
+        dependents (parse/dependents namespaces)
+        to-unload-set (set to-unload) ;;TODO is this the right set to filter on?
+        downstream (update-vals dependees
+                                (fn [immediate-dependees]
+                                  (set/intersection to-unload-set
+                                                    (parse/transitive-closure dependees immediate-dependees))))
+        to-load-set (set to-load)
+        to-load-or-unload-set (set/union to-load-set to-unload-set)
+        upstream (update-vals dependents
+                              (fn [immediate-dependents]
+                                (set/intersection to-load-or-unload-set
+                                                  (parse/transitive-closure dependents immediate-dependents))))
+        needed-before-unload (into {} (map (fn [ns]
+                                             (let [requires (get-in namespaces [ns :requires])]
+                                               [ns (fn []
+                                                     (let [{:keys [unloaded]} @state]
+                                                       (every? unloaded requires)))])))
+                                   to-unload)
+        needed-before-load (into {} (map (fn [ns]
+                                           (let [requires (get-in namespaces [ns :requires])]
+                                             [ns (fn []
+                                                   (let [{:keys [unloaded]} @state]
+                                                     (every? unloaded requires)))])))
+                                 to-load)
+        next-state (fn [completed-op ns]
+                     (case completed-op
+                       :loaded (swap! state )))
+        ->s (fn []
+              )
+        s (lazy-seq
+            (->s))]
+    ))
+
+(comment
+  (fj-fsm
+    (#'clj-reload.core/scan @@#'clj-reload.core/*state {})
+    nil
+    )
   )

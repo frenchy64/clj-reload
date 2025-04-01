@@ -120,7 +120,7 @@
          (recur ns nses))))))
 
 (defn dependees 
-  "Inverts the requies graph. Returns {ns -> #{downstream-ns ...}}"
+  "Inverts the requires graph. Returns {ns -> #{downstream-ns ...}}"
   [namespaces]
   (let [*m (volatile! (transient {}))]
     (doseq [[from {tos :requires}] namespaces]
@@ -130,8 +130,13 @@
         (vswap! *m util/update! to util/conjs from)))
     (persistent! @*m)))
 
+(defn dependents 
+  "Returns {ns -> #{upstream-ns ...}}"
+  [namespaces]
+  (update-vals namespaces (fnil :requires #{})))
+
 (defn transitive-closure
-  "Starts from starts, expands using dependees {ns -> #{downsteram-ns ...}},
+  "Starts from starts, expands using dependees {ns -> #{downstream-ns ...}},
    returns #{ns ...}"
   [deps starts]
   (loop [queue starts
