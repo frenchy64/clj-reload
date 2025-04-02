@@ -188,4 +188,4 @@
       ;; drop everything in stash
       (remove-ns 'clj-reload.stash)
       (dosync
-        (alter @#'clojure.core/*loaded-libs* disj 'clj-reload.stash)))))
+        (commute @#'clojure.core/*loaded-libs* disj 'clj-reload.stash)))))

@@ -28,7 +28,7 @@
     (when (@@#'clojure.core/*loaded-libs* ns)
       (remove-ns ns)
       (dosync
-        (alter @#'clojure.core/*loaded-libs* disj ns)))))
+        (commute @#'clojure.core/*loaded-libs* disj ns)))))
 
 (defn sym->file [sym]
   (-> sym

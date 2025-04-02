@@ -297,7 +297,7 @@
   (remove-ns ns)
   (assert (not (thread-bound? #'clojure.core/*loaded-libs*)))
   (dosync
-    (alter @#'clojure.core/*loaded-libs* disj ns)))
+    (commute @#'clojure.core/*loaded-libs* disj ns)))
 
 (defn- ns-load [ns file keeps config opts]
   (when (= (:output config) :verbose)
