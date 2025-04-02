@@ -60,46 +60,70 @@
 (defn fj-plan-rings [opts]
   )
 
-(defn fj-fsm [{:keys [to-unload to-load namespaces]} opts]
-  (let [_ (prn namespaces)
-        _ (prn deps)
+(defn fj-fsm [{:keys [to-unload to-load unloaded-volatiles loaded-volatiles namespaces]} {:clj-reload.core/keys [cancel] :as opts}]
+  (let [to-unload-set (set to-unload) ;;TODO is this the right set to filter on?
+        to-load-set (set to-load)
+        unloaded-volatiles (zipmap to-unload (repeatedly #(volatile! false)))
+        loaded-volatiles (zipmap to-load (repeatedly #(volatile! false)))
         state (atom {:unloaded #{}
                      :loaded #{}
+                     :to-unload-set to-unload-set
+                     :to-load-set (set to-load)
                      :to-unload to-unload
-                     :to-load to-load})
+                     :to-load to-load
+                     :available []})
         dependees (parse/dependees namespaces)
         dependents (parse/dependents namespaces)
-        to-unload-set (set to-unload) ;;TODO is this the right set to filter on?
-        downstream (update-vals dependees
-                                (fn [immediate-dependees]
-                                  (set/intersection to-unload-set
-                                                    (parse/transitive-closure dependees immediate-dependees))))
-        to-load-set (set to-load)
+        ns->downstream (update-vals dependees
+                                    (fn [immediate-dependees]
+                                      (set/intersection to-unload-set
+                                                        (parse/transitive-closure dependees immediate-dependees))))
         to-load-or-unload-set (set/union to-load-set to-unload-set)
-        upstream (update-vals dependents
-                              (fn [immediate-dependents]
-                                (set/intersection to-load-or-unload-set
-                                                  (parse/transitive-closure dependents immediate-dependents))))
-        needed-before-unload (into {} (map (fn [ns]
-                                             (let [requires (get-in namespaces [ns :requires])]
-                                               [ns (fn []
-                                                     (let [{:keys [unloaded]} @state]
-                                                       (every? unloaded requires)))])))
-                                   to-unload)
-        needed-before-load (into {} (map (fn [ns]
-                                           (let [requires (get-in namespaces [ns :requires])]
-                                             [ns (fn []
-                                                   (let [{:keys [unloaded]} @state]
-                                                     (every? unloaded requires)))])))
-                                 to-load)
-        next-state (fn [completed-op ns]
-                     (case completed-op
-                       :loaded (swap! state )))
-        ->s (fn []
-              )
-        s (lazy-seq
-            (->s))]
-    ))
+        ns->upstream (update-vals dependents
+                                  (fn [immediate-dependents]
+                                    (set/intersection to-load-or-unload-set
+                                                      (parse/transitive-closure dependents immediate-dependents))))
+        ns->can-unload? (into {} (map (fn [ns]
+                                        (let [downstream (ns->downstream ns)
+                                              relevant-volatiles (mapv unloaded-volatiles downstream)]
+                                          [ns (fn [_]
+                                                (every? deref relevant-volatiles))])))
+                              to-unload)
+        ns->can-load? (into {} (map (fn [ns]
+                                      (let [upstream (ns->upstream ns)
+                                            relevant-volatiles (-> (mapv unloaded-volatiles upstream)
+                                                                   (conj (unloaded-volatiles ns))
+                                                                   (into (map loaded-volatiles) upstream))]
+                                        [ns (fn [_]
+                                              (every? deref relevant-volatiles))])))
+                            to-load)
+        ->s (fn ->s []
+              (lazy-seq
+                (loop []
+                  (let [{:keys [available to-unload to-load]}
+                        (swap! state
+                               (fn [{:keys [to-unload to-load] :as m}]
+                                 (let [can-unloads (filterv #((ns->can-unload? %) m) to-unload)
+                                       can-loads (filterv #((ns->can-load? %) m) to-load)]
+                                   (if-some [available (not-empty (into (mapv #(do {:op :unload :ns %}) can-unloads)
+                                                                        (map #(do {:op :load :ns %}))
+                                                                        can-loads))]
+                                     (-> m
+                                         (update :to-unload #(into [] (remove (set can-unloads)) %))
+                                         (update :to-load #(into [] (remove (set can-loads)) %))
+                                         (update :to-unload-set #(apply disj % can-unloads))
+                                         (update :to-load-set #(apply disj % can-loads))
+                                         (assoc :available available))
+                                     m))))]
+                    (or (when (seq available)
+                          (mapv (fn [])))
+                        (when (and (or (seq to-unload)
+                                       (seq to-load))
+                                   (not (Thread/interrupted))
+                                   (not @cancel))
+                          (recur)))))))
+        s (->s)]
+    s))
 
 (comment
   (fj-fsm
