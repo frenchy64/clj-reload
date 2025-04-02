@@ -95,11 +95,11 @@
     @*res))
 
 (defn- scan-impl [{files-before :files
-                   nses-before  :namespaces} since]
-  (let [files-now        (->> (:dirs *config*)
+                   nses-before  :namespaces} since config]
+  (let [files-now        (->> (:dirs config)
                            (mapcat #(file-seq (io/file %)))
                            (filter util/file?)
-                           (filter #(re-matches (:files *config*) (util/file-name %))))
+                           (filter #(re-matches (:files config) (util/file-name %))))
 
         [files-modified
          files-broken]   (reduce
@@ -155,7 +155,7 @@
    (find-namespaces #".*"))
   ([regex]
    (binding [util/*log-fn* nil]
-     (let [{:keys [namespaces']} (scan-impl @*state 0)]
+     (let [{:keys [namespaces']} (scan-impl @*state 0 *config*)]
        (into #{} (filter #(re-matches regex (name %)) (keys namespaces')))))))
 
 (def ^{:doc "Returns dirs that are currently on classpath"
@@ -185,17 +185,16 @@
     (binding [util/*log-fn* nil]
       (let [dirs  (vec (or (:dirs opts) (classpath-dirs)))
             files (or (:files opts) #".*\.cljc?")
-            now   (util/now)]
-        (alter-var-root #'*config*
-          (constantly
-            {:dirs        dirs
-             :files       files
-             :no-unload   (set (:no-unload opts))
-             :no-reload   (set (:no-reload opts))
-             :reload-hook (:reload-hook opts 'after-ns-reload)
-             :unload-hook (:unload-hook opts 'before-ns-unload)
-             :output      (:output opts :verbose)}))
-        (let [{:keys [files' namespaces']} (scan-impl nil 0)]
+            now   (util/now)
+            config {:dirs        dirs
+                    :files       files
+                    :no-unload   (set (:no-unload opts))
+                    :no-reload   (set (:no-reload opts))
+                    :reload-hook (:reload-hook opts 'after-ns-reload)
+                    :unload-hook (:unload-hook opts 'before-ns-unload)
+                    :output      (:output opts :verbose)}]
+        (alter-var-root #'*config* (constantly config))
+        (let [{:keys [files' namespaces']} (scan-impl nil 0 config)]
           (reset! *state {:since       now
                           :files       files'
                           :namespaces  namespaces'}))))))
@@ -213,9 +212,9 @@
                 (get-in from [ns-sym :keep])
                 (:keep ns)))]))
 
-(defn- scan [state opts]
+(defn- scan [state config opts]
   (assert (not (thread-bound? #'clojure.core/*loaded-libs*)))
-  (let [{:keys [no-unload no-reload]} *config*
+  (let [{:keys [no-unload no-reload]} config
         {:keys [since to-load to-unload files namespaces]} state
         {:keys [only] :or {only :changed}} opts
         now              (util/now)
@@ -225,10 +224,10 @@
                 namespaces'
                 to-unload'
                 to-load']} (case only
-                             :changed (scan-impl state since)
-                             :loaded  (scan-impl state 0)
-                             :all     (scan-impl state 0)
-                             #_regex  (-> (scan-impl state since)
+                             :changed (scan-impl state since config)
+                             :loaded  (scan-impl state 0 config)
+                             :all     (scan-impl state 0 config)
+                             #_regex  (-> (scan-impl state since config)
                                         (add-unloaded only loaded)))
         
         _                (doseq [[ns {:keys [exception]}] broken
@@ -276,15 +275,17 @@
       :files      files'
       :namespaces (carry-keeps namespaces namespaces')
       :to-unload  to-unload''
+      :unloaded-volatiles (zipmap to-unload'' (repeatedly #(volatile! nil)))
       :to-load    to-load''
+      :loaded-volatiles (zipmap to-load'' (repeatedly #(volatile! nil)))
       ::unloaded []
       ::loaded [])))
 
-(defn- ns-unload [ns]
-  (when (= (:output *config*) :verbose)
+(defn- ns-unload [ns config opts]
+  (when (= (:output config) :verbose)
     (util/log "Unloading" ns))
   (try
-    (when-some [unload-hook (:unload-hook *config*)]
+    (when-some [unload-hook (:unload-hook config)]
       (when-some [ns-obj (find-ns ns)]
         (when-some [unload-fn (ns-resolve ns-obj unload-hook)]
           (unload-fn))))
@@ -298,15 +299,15 @@
   (dosync
     (alter @#'clojure.core/*loaded-libs* disj ns)))
 
-(defn- ns-load [ns file keeps]
-  (when (= (:output *config*) :verbose)
+(defn- ns-load [ns file keeps config opts]
+  (when (= (:output config) :verbose)
     (util/log "Loading" ns #_"from" #_(util/file-path file)))
   (try
     (if (empty? keeps)
       (util/ns-load-file (slurp file) ns file)
       (keep/ns-load-patched ns file keeps))
     
-    (when-some [reload-hook (:reload-hook *config*)]
+    (when-some [reload-hook (:reload-hook config)]
       (when-some [reload-fn (ns-resolve (find-ns ns) reload-hook)]
         (reload-fn)))
     
@@ -317,9 +318,9 @@
 
 (defn- do-unload
   "Returns nil or error map."
-  [ns state opts]
+  [ns state config opts]
   (let [keeps (keep/resolve-keeps ns (-> state :namespaces ns :keep))]
-    (ns-unload ns)
+    (ns-unload ns config opts)
     (swap! *state
            (fn [state]
              (-> state
@@ -330,9 +331,9 @@
 
 (defn- do-load
   "Returns nil or error map."
-  [ns {::keys [loaded unloaded] :as state} opts]
+  [ns {::keys [loaded unloaded] :as state} config opts]
   (let [files (-> state :namespaces ns :ns-files)]
-    (if-some [ex (some #(ns-load ns % (-> state :namespaces ns :keep)) files)]
+    (if-some [ex (some #(ns-load ns % (-> state :namespaces ns :keep) config opts) files)]
       (do
         (swap! *state update :to-unload #(cons ns %))
         (if (:throw opts true)
@@ -356,7 +357,7 @@
 
 (declare fj-reload1)
 
-(defn- fj-fork [forks {::keys [^java.util.concurrent.ExecutorService threadpool cancel] :as opts}]
+(defn- fj-fork [forks config {::keys [^java.util.concurrent.ExecutorService threadpool cancel] :as opts}]
   (some (fn [^java.util.concurrent.Future future]
           (try (.get future)
                (catch java.util.concurrent.ExecutionException e
@@ -364,31 +365,31 @@
                  (throw (or (.getCause e) e)))))
         (.invokeAll threadpool
                     (mapv (fn [fork]
-                            (bound-fn [] (fj-reload1 fork opts)))
+                            (bound-fn [] (fj-reload1 fork config opts)))
                          forks))))
 
-(defn- do-task 
+(defn- do-task
   "Returns nil on success, or error map (or throws) on error."
-  [{:keys [op ns]} {::keys [cancel skip] :as opts}]
+  [{:keys [op ns]} config {::keys [cancel skip] :as opts}]
   (if @cancel
     {:result :cancelled :ns ns}
     (case op
       :unload (when-not (contains? skip :unload)
-                (do-unload ns @*state opts))
+                (do-unload ns @*state config opts))
       :load (when-not (contains? skip :load)
-              (do-load ns @*state opts)))))
+              (do-load ns @*state config opts)))))
 
 (defn- do-synchronous-tasks
   "Returns nil on success, or error map (or throws) on error."
-  [tasks opts]
-  (some #(do-task % opts) tasks))
+  [tasks config opts]
+  (some #(do-task % config opts) tasks))
 
 (defn- fj-reload1
   "Returns nil on success, or error map (or throws) on error."
-  [{:keys [before forks after]} opts]
-  (or (do-synchronous-tasks before opts)
-      (fj-fork forks opts)
-      (do-synchronous-tasks after opts)))
+  [{:keys [before forks after]} config opts]
+  (or (do-synchronous-tasks before config opts)
+      (fj-fork forks config opts)
+      (do-synchronous-tasks after config opts)))
 
 ;;TODO fork => unload, join => load
 ;#_
@@ -417,15 +418,16 @@
   (with-lock ::fj-reload
     (binding [util/*log-fn* (:log-fn opts util/*log-fn*)]
       (let [t (System/currentTimeMillis)
-            state (swap! *state scan opts)
+            config *config*
+            state (swap! *state scan config opts)
             cancel (volatile! false)
             max-parallelism 1
             threadpool (java.util.concurrent.Executors/newWorkStealingPool 1)
             opts (assoc opts ::cancel cancel ::threadpool threadpool)
             plan (plan/fj-plan state)]
-        (when (= (:output *config*) :quieter)
+        (when (= (:output config) :quieter)
           (util/log (format "Reloading %s namespaces..." (count (:to-load state)))))
-        (try (or (when-some [err (fj-fork plan opts)]
+        (try (or (when-some [err (fj-fork plan config opts)]
                    (vreset! cancel true)
                    err)
                  (-> @*state
